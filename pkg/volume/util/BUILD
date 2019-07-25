@@ -15,6 +15,7 @@ go_library(
         "nested_volumes.go",
         "resize_util.go",
         "util.go",
+        "operation_starttime_cache.go",
     ],
     importpath = "k8s.io/kubernetes/pkg/volume/util",
     visibility = ["//visibility:public"],
@@ -56,6 +57,7 @@ go_test(
         "nested_volumes_test.go",
         "resize_util_test.go",
         "util_test.go",
+        "operation_starttime_cache_test.go",
     ],
     embed = [":go_default_library"],
     deps = [
