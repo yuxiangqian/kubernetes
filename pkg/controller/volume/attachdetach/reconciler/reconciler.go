@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
@@ -34,8 +35,8 @@ import (
 	kevents "k8s.io/kubernetes/pkg/kubelet/events"
 	"k8s.io/kubernetes/pkg/util/goroutinemap/exponentialbackoff"
 	"k8s.io/kubernetes/pkg/volume"
+	"k8s.io/kubernetes/pkg/volume/util"
 	"k8s.io/kubernetes/pkg/volume/util/operationexecutor"
-	v1 "k8s.io/kubernetes/staging/src/k8s.io/api/core/v1"
 )
 
 // Reconciler runs a periodic loop to reconcile the desired state of the world with
@@ -69,7 +70,8 @@ func NewReconciler(
 	actualStateOfWorld cache.ActualStateOfWorld,
 	attacherDetacher operationexecutor.OperationExecutor,
 	nodeStatusUpdater statusupdater.NodeStatusUpdater,
-	recorder record.EventRecorder) Reconciler {
+	recorder record.EventRecorder,
+	operationStartTimeCache util.OperationStartTimeCache) Reconciler {
 	return &reconciler{
 		loopPeriod:                loopPeriod,
 		maxWaitForUnmountDuration: maxWaitForUnmountDuration,
@@ -81,7 +83,7 @@ func NewReconciler(
 		nodeStatusUpdater:         nodeStatusUpdater,
 		timeOfLastSync:            time.Now(),
 		recorder:                  recorder,
-		operationStartTimeCache:   NewOperationStartionTimeCache(),
+		operationStartTimeCache:   operationStartTimeCache,
 	}
 }
 
@@ -96,7 +98,7 @@ type reconciler struct {
 	timeOfLastSync            time.Time
 	disableReconciliationSync bool
 	recorder                  record.EventRecorder
-	operationStartTimeCache   OperationStartTimeCache,
+	operationStartTimeCache   util.OperationStartTimeCache
 }
 
 func (rc *reconciler) Run(stopCh <-chan struct{}) {
@@ -189,12 +191,6 @@ func (rc *reconciler) reconcile() {
 				continue
 			}
 
-			// insert a detach operation start time into cache if needed for the volume for metrics reporting
-			// note that the plugin name has been set to "" as there is no visibility at this moment to which
-			// plugin/csi driver would be conducting the operation. It will be populated later when detach
-			// operation function is created and plugin name then could be decided
-			rc.operationStartTimeCache.AddIfNotExist(attachedVolume.VolumeName, "", "volume_detach")
-
 			// Set the detach request time
 			elapsedTime, err := rc.actualStateOfWorld.SetDetachRequestTime(attachedVolume.VolumeName, attachedVolume.NodeName)
 			if err != nil {
@@ -227,11 +223,17 @@ func (rc *reconciler) reconcile() {
 				continue
 			}
 
+			// insert a detach operation start time into cache if needed for the volume for metrics reporting
+			// note that the plugin name has been set to "" as there is no visibility at this moment to which
+			// plugin/csi driver would be conducting the operation. It will be populated later when detach
+			// operation function is created and plugin name then could be decided
+			rc.operationStartTimeCache.AddIfNotExist(createOperationUniqueKey(attachedVolume.VolumeName, attachedVolume.NodeName), "", "volume_detach")
+
 			// Trigger detach volume which requires verifying safe to detach step
 			// If timeout is true, skip verifySafeToDetach check
 			klog.V(5).Infof(attachedVolume.GenerateMsgDetailed("Starting attacherDetacher.DetachVolume", ""))
 			verifySafeToDetach := !timeout
-			err = rc.attacherDetacher.DetachVolume(attachedVolume.AttachedVolume, verifySafeToDetach, rc.actualStateOfWorld, &rc.operationStartTimeCache)
+			err = rc.attacherDetacher.DetachVolume(attachedVolume.AttachedVolume, verifySafeToDetach, rc.actualStateOfWorld, rc.operationStartTimeCache)
 			if err == nil {
 				if !timeout {
 					klog.Infof(attachedVolume.GenerateMsgDetailed("attacherDetacher.DetachVolume started", ""))
@@ -245,7 +247,7 @@ func (rc *reconciler) reconcile() {
 				// Log all other errors.
 				klog.Errorf(attachedVolume.GenerateErrorDetailed("attacherDetacher.DetachVolume failed to start", err).Error())
 				// report error count metrics
-				RecordMetric(attachedVolume.VolumeName, &rc.operationStartTimeCache, err)
+				util.RecordMetric(createOperationUniqueKey(attachedVolume.VolumeName, attachedVolume.NodeName), rc.operationStartTimeCache, err)
 			}
 		}
 	}
@@ -268,6 +270,8 @@ func (rc *reconciler) attachDesiredVolumes() {
 				klog.Infof(volumeToAttach.GenerateMsgDetailed("Volume attached--touching", ""))
 			}
 			rc.actualStateOfWorld.ResetDetachRequestTime(volumeToAttach.VolumeName, volumeToAttach.NodeName)
+			// remove any pre-existed cache entry in this case. The volume has been attached
+			rc.operationStartTimeCache.Delete(createOperationUniqueKey(volumeToAttach.VolumeName, volumeToAttach.NodeName))
 			continue
 		}
 		// Don't even try to start an operation if there is already one running
@@ -289,11 +293,17 @@ func (rc *reconciler) attachDesiredVolumes() {
 			}
 		}
 
+		// insert a detach operation start time into cache if needed for the volume for metrics reporting
+		// note that the plugin name has been set to "" as there is no visibility at this moment to which
+		// plugin/csi driver would be conducting the operation. It will be populated later when detach
+		// operation function is created and plugin name then could be decided
+		rc.operationStartTimeCache.AddIfNotExist(createOperationUniqueKey(volumeToAttach.VolumeName, volumeToAttach.NodeName), "", "volume_attach")
+
 		// Volume/Node doesn't exist, spawn a goroutine to attach it
 		if klog.V(5) {
 			klog.Infof(volumeToAttach.GenerateMsgDetailed("Starting attacherDetacher.AttachVolume", ""))
 		}
-		err := rc.attacherDetacher.AttachVolume(volumeToAttach.VolumeToAttach, rc.actualStateOfWorld)
+		err := rc.attacherDetacher.AttachVolume(volumeToAttach.VolumeToAttach, rc.actualStateOfWorld, rc.operationStartTimeCache)
 		if err == nil {
 			klog.Infof(volumeToAttach.GenerateMsgDetailed("attacherDetacher.AttachVolume started", ""))
 		}
@@ -301,6 +311,8 @@ func (rc *reconciler) attachDesiredVolumes() {
 			// Ignore exponentialbackoff.IsExponentialBackoff errors, they are expected.
 			// Log all other errors.
 			klog.Errorf(volumeToAttach.GenerateErrorDetailed("attacherDetacher.AttachVolume failed to start", err).Error())
+			// report error count metrics
+			util.RecordMetric(createOperationUniqueKey(volumeToAttach.VolumeName, volumeToAttach.NodeName), rc.operationStartTimeCache, err)
 		}
 	}
 }
@@ -377,4 +389,8 @@ func (rc *reconciler) reportMultiAttachError(volumeToAttach cache.VolumeToAttach
 	}
 	detailedMsg := volumeToAttach.GenerateMsgDetailed("Multi-Attach error", fmt.Sprintf("Volume is already used by pods %s on node %s", strings.Join(podNames, ", "), strings.Join(otherNodesStr, ", ")))
 	klog.Warningf(detailedMsg)
+}
+
+func createOperationUniqueKey(volumeName v1.UniqueVolumeName, nodeName types.NodeName) string {
+	return string(nodeName) + "/" + string(volumeName)
 }

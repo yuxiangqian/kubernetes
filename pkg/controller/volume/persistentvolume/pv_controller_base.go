@@ -214,7 +214,7 @@ func (ctrl *PersistentVolumeController) deleteVolume(volume *v1.PersistentVolume
 	// record deletion metric if a deletion start timestamp is in the cache
 	// the following calls will be a no-op if there is nothing for this volume in the cache
 	// end of timestamp cache entry lifecycle, "RecordMetric" will do the clean
-	util.RecordMetric(volume.Name, &ctrl.operationTimestamps, nil)
+	util.RecordMetric(volume.Name, ctrl.operationTimestamps, nil)
 
 	if volume.Spec.ClaimRef == nil {
 		return

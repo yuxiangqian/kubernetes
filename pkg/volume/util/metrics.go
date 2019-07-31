@@ -132,7 +132,7 @@ func recordVolumeOperationErrorMetric(pluginName, opName string) {
 // RecordMetric records either an error count metric or a latency metric if there
 // exists a start timestamp entry in the cache. For a successful operation, i.e.,
 // err == nil, the corresponding timestamp entry will be removed from cache
-func RecordMetric(key string, c *OperationStartTimeCache, err error) {
+func RecordMetric(key string, c OperationStartTimeCache, err error) {
 	pluginName, operation, startTime, ok := c.Load(key)
 	if !ok {
 		return

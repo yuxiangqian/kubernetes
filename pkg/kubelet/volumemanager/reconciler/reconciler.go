@@ -26,7 +26,7 @@ import (
 	"path"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -118,6 +118,7 @@ func NewReconciler(
 		volumePluginMgr:               volumePluginMgr,
 		kubeletPodsDir:                kubeletPodsDir,
 		timeOfLastSync:                time.Time{},
+		operationStartTimeCache:       util.NewOperationStartTimeCache(),
 	}
 }
 
@@ -137,6 +138,7 @@ type reconciler struct {
 	volumePluginMgr               *volumepkg.VolumePluginMgr
 	kubeletPodsDir                string
 	timeOfLastSync                time.Time
+	operationStartTimeCache       *util.OperationStartTimeCache
 }
 
 func (rc *reconciler) Run(stopCh <-chan struct{}) {
@@ -215,7 +217,7 @@ func (rc *reconciler) reconcile() {
 					NodeName:   rc.nodeName,
 				}
 				klog.V(5).Infof(volumeToAttach.GenerateMsgDetailed("Starting operationExecutor.AttachVolume", ""))
-				err := rc.operationExecutor.AttachVolume(volumeToAttach, rc.actualStateOfWorld)
+				err := rc.operationExecutor.AttachVolume(volumeToAttach, rc.actualStateOfWorld, &rc.operationStartTimeCache)
 				if err != nil &&
 					!nestedpendingoperations.IsAlreadyExists(err) &&
 					!exponentialbackoff.IsExponentialBackoff(err) {
@@ -303,7 +305,7 @@ func (rc *reconciler) reconcile() {
 					// Only detach if kubelet detach is enabled
 					klog.V(5).Infof(attachedVolume.GenerateMsgDetailed("Starting operationExecutor.DetachVolume", ""))
 					err := rc.operationExecutor.DetachVolume(
-						attachedVolume.AttachedVolume, false /* verifySafeToDetach */, rc.actualStateOfWorld)
+						attachedVolume.AttachedVolume, false /* verifySafeToDetach */, rc.actualStateOfWorld, &rc.operationStartTimeCache)
 					if err != nil &&
 						!nestedpendingoperations.IsAlreadyExists(err) &&
 						!exponentialbackoff.IsExponentialBackoff(err) {

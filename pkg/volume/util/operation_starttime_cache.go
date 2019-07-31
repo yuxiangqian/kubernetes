@@ -36,45 +36,81 @@ func newOperationTimestamp(pluginName, operationName string) *operationTimestamp
 	}
 }
 
-// OperationStartTimeCache concurrent safe cache for operation start timestamps
-type OperationStartTimeCache struct {
+// operationStartTimeCache concurrent safe cache for operation start timestamps
+type operationStartTimeCache struct {
 	cache sync.Map
 }
 
 // NewOperationStartTimeCache creates a operation timestamp cache
 func NewOperationStartTimeCache() OperationStartTimeCache {
-	return OperationStartTimeCache{
+	return &operationStartTimeCache{
 		cache: sync.Map{},
 	}
 }
 
-// AddIfNotExist returns directly if there exists an entry with the key. Otherwise, it
-// creates a new operation timestamp using operationName, pluginName, and current timestamp
-// and stores the operation timestamp with the key
-func (c *OperationStartTimeCache) AddIfNotExist(key, pluginName, operationName string) {
+type OperationStartTimeCache interface {
+	// AddIfNotExist returns directly if there exists an entry with the key. Otherwise, it
+	// creates a new operation timestamp using operationName, pluginName, and current timestamp
+	// and stores the operation timestamp with the key
+	AddIfNotExist(key, pluginName, operationName string)
+
+	// Delete deletes a value for a key.
+	Delete(key string)
+
+	// Has returns a bool value indicates the existence of a key in the cache
+	Has(key string) bool
+
+	// Load retrieves information from the cache by the passed in key. If there exists no such entry in the cache or
+	// the entry in the cache is not of operationTimestamp type, "ok" will be set to false and
+	// all other returned values should NOT be relied upon.
+	Load(key string) (pluginName, operationName string, startTime time.Time, ok bool)
+
+	// UpdatePluginName updates the pluginName field of a cached operationTimestamp entry
+	// returns true upon success
+	UpdatePluginName(key, newPluginName string) bool
+}
+
+func (c *operationStartTimeCache) AddIfNotExist(key, pluginName, operationName string) {
 	ts := newOperationTimestamp(pluginName, operationName)
 	c.cache.LoadOrStore(key, ts)
 }
 
-// Delete deletes a value for a key.
-func (c *OperationStartTimeCache) Delete(key string) {
+func (c *operationStartTimeCache) Delete(key string) {
 	c.cache.Delete(key)
 }
 
-// Has returns a bool value indicates the existence of a key in the cache
-func (c *OperationStartTimeCache) Has(key string) bool {
+func (c *operationStartTimeCache) Has(key string) bool {
 	_, exists := c.cache.Load(key)
 	return exists
 }
 
-func (c *OperationStartTimeCache) Load(key string) (pluginName, operationName string, startTime time.Time, ok bool) {
-	obj, exists := c.cache.Load(key)
-	if !exists {
-		return "", "", time.Time{}, false
-	}
-	ts, ok := obj.(*operationTimestamp)
+func (c *operationStartTimeCache) loadEntry(key string) (operationTimestamp, bool) {
+	var ts operationTimestamp
+	obj, ok := c.cache.Load(key)
 	if !ok {
-		return "", "", time.Time{}, false
+		return ts, ok
 	}
-	return ts.pluginName, ts.operation, ts.startTs, true
+	ts, ok = obj.(operationTimestamp)
+	return ts, ok
+}
+
+func (c *operationStartTimeCache) Load(key string) (pluginName, operationName string, startTime time.Time, ok bool) {
+	ts, ok := c.loadEntry(key)
+	if !ok {
+		return "", "", time.Time{}, ok
+	} else {
+		return ts.pluginName, ts.operation, ts.startTs, ok
+	}
+}
+
+func (c *operationStartTimeCache) UpdatePluginName(key, newPluginName string) bool {
+	ts, ok := c.loadEntry(key)
+	if !ok || ts.pluginName == newPluginName {
+		return false
+	}
+	ts.pluginName = newPluginName
+	newTs := newOperationTimestamp(newPluginName, ts.operation)
+	newTs.startTs = ts.startTs
+	c.cache.Store(key, newTs)
+	return true
 }

@@ -24,7 +24,7 @@ import (
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -128,18 +128,19 @@ func NewAttachDetachController(
 	// dropped pods so they are continuously processed until it is accepted or
 	// deleted (probably can't do this with sharedInformer), etc.
 	adc := &attachDetachController{
-		kubeClient:  kubeClient,
-		pvcLister:   pvcInformer.Lister(),
-		pvcsSynced:  pvcInformer.Informer().HasSynced,
-		pvLister:    pvInformer.Lister(),
-		pvsSynced:   pvInformer.Informer().HasSynced,
-		podLister:   podInformer.Lister(),
-		podsSynced:  podInformer.Informer().HasSynced,
-		podIndexer:  podInformer.Informer().GetIndexer(),
-		nodeLister:  nodeInformer.Lister(),
-		nodesSynced: nodeInformer.Informer().HasSynced,
-		cloud:       cloud,
-		pvcQueue:    workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcs"),
+		kubeClient:          kubeClient,
+		pvcLister:           pvcInformer.Lister(),
+		pvcsSynced:          pvcInformer.Informer().HasSynced,
+		pvLister:            pvInformer.Lister(),
+		pvsSynced:           pvInformer.Informer().HasSynced,
+		podLister:           podInformer.Lister(),
+		podsSynced:          podInformer.Informer().HasSynced,
+		podIndexer:          podInformer.Informer().GetIndexer(),
+		nodeLister:          nodeInformer.Lister(),
+		nodesSynced:         nodeInformer.Informer().HasSynced,
+		cloud:               cloud,
+		pvcQueue:            workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "pvcs"),
+		operationTimestamps: volumeutil.NewOperationStartTimeCache(),
 	}
 
 	if utilfeature.DefaultFeatureGate.Enabled(features.CSIMigration) &&
@@ -185,7 +186,8 @@ func NewAttachDetachController(
 		adc.actualStateOfWorld,
 		adc.attacherDetacher,
 		adc.nodeStatusUpdater,
-		recorder)
+		recorder,
+		adc.operationTimestamps)
 
 	adc.desiredStateOfWorldPopulator = populator.NewDesiredStateOfWorldPopulator(
 		timerConfig.DesiredStateOfWorldPopulatorLoopSleepPeriod,
@@ -326,6 +328,24 @@ type attachDetachController struct {
 
 	// pvcQueue is used to queue pvc objects
 	pvcQueue workqueue.RateLimitingInterface
+
+	// operationTimestamps caches start timestamp of attach/detach for metric recording.
+	// Detailed lifecyle/key for each operation
+	// 1. attach
+	//     key:        string format of VolumeToAttach.VolumeName
+	//     start time: the first time "AttachVolume" is called in reconciler in "attachDesiredVolumes"
+	//                 for the VolumeToAttach object
+	//     end time:   after the "VolumeToAttach" has been successfully attached to the desired node
+	//     abort:      The "VolumeToAttach" has been marked "attached", i.e., actualStateOfWorld
+	//                 returns true on "IsVolumeAttachedToNode"
+	// 2. detach
+	//     key:        string format of AttachedVolume.VolumeName
+	//     start time: the first time "DetachVolume" is called in reconciler in "reconcile"
+	//                 for the "AttachedVolume" object
+	//     end time:   after the volume "AttachedVolume" object refers to being successfully
+	//                 detached from the node
+	//     abort:      N.A.
+	operationTimestamps volumeutil.OperationStartTimeCache
 }
 
 func (adc *attachDetachController) Run(stopCh <-chan struct{}) {
